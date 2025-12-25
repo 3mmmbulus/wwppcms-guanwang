@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { RefreshIcon, Copy01Icon } from '@hugeicons/core-free-icons';
+import { verifyOrderPayment } from '@/lib/paymentVerify';
 import {
   Dialog,
   DialogContent,
@@ -113,56 +114,6 @@ export function Orders() {
       console.error('copy failed', err);
       pushToast({ title: '复制失败', description: '请手动复制地址', variant: 'error' });
     }
-  };
-
-  const fetchJsonWithFallback = async (url: string, init?: RequestInit) => {
-    const normalized = url.startsWith('http') ? url : `https://${url}`;
-    const directHeaders = { Accept: 'application/json', ...(init?.headers || {}) };
-    const proxies = [
-      (u: string) => `https://r.jina.ai/${u}`,
-      (u: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-      (u: string) => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
-      (u: string) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
-      (u: string) => `https://thingproxy.freeboard.io/fetch/${u}`,
-    ];
-
-    const tryParse = async (res: Response) => {
-      const ct = res.headers.get('content-type') || '';
-      if (ct.includes('application/json')) return res.json();
-      const text = await res.text();
-      const match = text.match(/\{[\s\S]*\}/);
-      if (match) return JSON.parse(match[0]);
-      throw new Error('json parse failed');
-    };
-
-    try {
-      const direct = await fetch(normalized, { ...init, cache: 'no-store', headers: directHeaders });
-      if (direct.ok) return await tryParse(direct);
-    } catch (err) {
-      // fall through to proxies when CORS blocks direct
-    }
-
-    for (const makeUrl of proxies) {
-      const u = makeUrl(normalized);
-      try {
-        const res = await fetch(u, { ...init, cache: 'no-store', headers: init?.headers });
-        if (res.ok) {
-          if (u.includes('/get?')) {
-            const json = await res.json();
-            if (json?.contents) {
-              const match = String(json.contents).match(/\{[\s\S]*\}/);
-              if (match) return JSON.parse(match[0]);
-              continue;
-            }
-          }
-          return await tryParse(res);
-        }
-      } catch (err) {
-        // try next proxy
-      }
-    }
-
-    throw new Error('fetch failed');
   };
 
   const fetchOrders = async () => {
@@ -370,74 +321,24 @@ export function Orders() {
                   }
                   setVerifying(true);
                   try {
-                    const usdtContract = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
-                    const tronApiKey = import.meta.env.VITE_TRON_PRO_API_KEY;
-                    const tronHeaders = tronApiKey ? { 'TRON-PRO-API-KEY': tronApiKey } : undefined;
-                    const endpoints = [
-                      `https://api.trongrid.io/v1/accounts/${payAddress}/transactions/trc20?only_to=true&contract_address=${usdtContract}&order_by=block_timestamp%2Cdesc&limit=50`,
-                      `https://apilist.tronscanapi.com/api/token_trc20/transfers?limit=20&start=0&sort=-timestamp&toAddress=${payAddress}&contract_address=${usdtContract}`,
-                      `https://apilist.tronscanapi.com/api/new/token_trc20/transfers?limit=20&start=0&sort=-timestamp&toAddress=${payAddress}&contract_address=${usdtContract}`,
-                      `https://apilist.tronscanapi.com/api/token_trc20/transfers?toAddress=${payAddress}&contract_address=${usdtContract}`,
-                    ];
+                    await verifyOrderPayment(selected.id);
 
-                    let data: any = null;
-                    for (const ep of endpoints) {
-                      try {
-                        data = await fetchJsonWithFallback(ep, tronHeaders ? { headers: tronHeaders } : undefined);
-                        if (data) break;
-                      } catch (err) {
-                        // try next
-                      }
-                    }
-                    if (!data) {
-                      pushToast({
-                        title: '自动校验被CORS拦截',
-                        description: '请点击下方区块浏览器手动确认；如在正式环境请配置后端代理或设置 VITE_TRON_PRO_API_KEY。',
-                        variant: 'warning',
-                      });
-                      return;
-                    }
-                    const transfers = data?.token_transfers || data?.data || [];
-                    const match = transfers.find((t: any) => {
-                      const to = (t.to || t.to_address || t.toAddress || '').toLowerCase();
-                      const value = Number(t.value || t.amount || t.quant || 0);
-                      const decimals = t.token_info?.decimals ?? t.tokenInfo?.decimals ?? 6;
-                      const amount = value / Math.pow(10, decimals);
-                      return to === payAddress.toLowerCase() && amount >= Number(selected.amount);
+                    const refreshed = await pb.collection('orders').getOne<Order>(selected.id, {
+                      expand: 'license_key',
+                      $autoCancel: false,
                     });
-                    if (match) {
-                      const txid = match.transaction_id || match.transactionID || match.txid || match.hash || match.txHash || '';
-                      let licenseId = selected.license_key;
-                      let licenseCodeLocal = licenseCode;
+                    const normalized = normalizeOrder(refreshed);
+                    setItems(prev => prev.map(o => (o.id === selected.id ? normalized : o)));
+                    setSelected(normalized);
 
-                      if (!licenseId) {
-                        const code = genLicenseCode();
-                        try {
-                          const lic = await pb.collection('license_keys').create({
-                            code,
-                            user: selected.user,
-                            status: 'unused',
-                            purchased_at: new Date().toISOString(),
-                            note: `order:${selected.id}`,
-                          });
-                          licenseId = lic.id;
-                          licenseCodeLocal = lic.code;
-                        } catch (createErr) {
-                          console.warn('auto create license failed, please issue server-side', createErr);
-                        }
-                      }
-
-                      await pb.collection('orders').update(selected.id, { status: 'confirmed', txid, license_key: licenseId });
-                      setItems(prev => prev.map(o => o.id === selected.id ? { ...o, status: 'confirmed', txid, license_key: licenseId } : o));
-                      setSelected(prev => prev ? { ...prev, status: 'confirmed', txid, license_key: licenseId || prev.license_key } : prev);
-                      if (licenseCodeLocal) setLicenseCode(licenseCodeLocal);
-                      pushToast({ title: '检测到入账', description: `订单已确认${licenseCodeLocal ? `，授权码：${licenseCodeLocal}` : ''}`, variant: 'success' });
+                    if (normalized.status === 'confirmed' || normalized.license_key) {
+                      pushToast({ title: '支付已确认', description: '授权码已发放（如未展示请稍后刷新）。', variant: 'success' });
                     } else {
-                      pushToast({ title: '未检测到入账', description: '请稍后再试，或确认金额/链是否正确。', variant: 'warning' });
+                      pushToast({ title: '未确认到账', description: '请稍后再试，或确认金额/链是否正确。', variant: 'warning' });
                     }
                   } catch (err) {
                     console.error('verify order failed', err);
-                    pushToast({ title: '校验失败', description: '请稍后重试或联系客服。', variant: 'error' });
+                    pushToast({ title: '校验失败', description: err instanceof Error ? err.message : '请稍后重试或联系客服。', variant: 'error' });
                   } finally {
                     setVerifying(false);
                   }

@@ -39,6 +39,7 @@ import {
   HourglassIcon,
   Copy01Icon,
 } from '@hugeicons/core-free-icons';
+import { verifyOrderPayment } from '@/lib/paymentVerify';
 
 interface LicenseKey {
   id: string;
@@ -112,11 +113,6 @@ export function Tasks() {
   const generatePayAmount = () => {
     const decimals = Math.floor(Math.random() * 10000);
     return `${payBase}.${decimals.toString().padStart(4, '0')}`;
-  };
-
-  const genLicenseCode = () => {
-    const rand = () => Math.random().toString(36).replace(/[^a-z0-9]/gi, '').toUpperCase().slice(0, 4).padEnd(4, 'X');
-    return `${rand()}-${rand()}-${rand()}-${rand()}-${rand()}`;
   };
 
   const payAddress = useMemo(() => {
@@ -390,71 +386,21 @@ export function Tasks() {
 
     setVerifyingPay(true);
     try {
-      const usdtContract = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
-      const tronApiKey = import.meta.env.VITE_TRON_PRO_API_KEY;
-      const tronHeaders = tronApiKey ? { 'TRON-PRO-API-KEY': tronApiKey } : undefined;
-      const endpoints = [
-        `https://api.trongrid.io/v1/accounts/${payAddress}/transactions/trc20?only_to=true&contract_address=${usdtContract}&order_by=block_timestamp%2Cdesc&limit=50`,
-        `https://apilist.tronscanapi.com/api/token_trc20/transfers?limit=20&start=0&sort=-timestamp&toAddress=${payAddress}&contract_address=${usdtContract}`,
-        `https://apilist.tronscanapi.com/api/new/token_trc20/transfers?limit=20&start=0&sort=-timestamp&toAddress=${payAddress}&contract_address=${usdtContract}`,
-        `https://apilist.tronscanapi.com/api/token_trc20/transfers?toAddress=${payAddress}&contract_address=${usdtContract}`,
-      ];
+      await verifyOrderPayment(currentOrder.id);
 
-      let data: any = null;
-      for (const ep of endpoints) {
-        try {
-          data = await fetchJsonWithFallback(ep, tronHeaders ? { headers: tronHeaders } : undefined as any);
-          if (data) break;
-        } catch (err) {
-          // try next
-        }
-      }
+      const refreshed = await pb.collection('orders').getOne<Order>(currentOrder.id, { $autoCancel: false });
+      setCurrentOrder(refreshed);
 
-      if (!data) {
-        pushToast('warning', '未能获取到账记录，请稍后再试或联系客服');
-        return;
-      }
-
-      const transfers = data?.token_transfers || data?.data || [];
-      const match = transfers.find((t: any) => {
-        const to = (t.to || t.to_address || t.toAddress || '').toLowerCase();
-        const value = Number(t.value || t.amount || t.quant || 0);
-        const decimals = t.token_info?.decimals ?? t.tokenInfo?.decimals ?? 6;
-        const amount = value / Math.pow(10, decimals);
-        return to === payAddress.toLowerCase() && amount >= Number(currentOrder.amount);
-      });
-
-      if (match) {
-        const txid = match.transaction_id || match.transactionID || match.txid || match.hash || match.txHash || '';
-        try {
-          await pb.collection('orders').update(currentOrder.id, { status: 'confirmed', txid });
-          setCurrentOrder(prev => prev && prev.id === currentOrder.id ? { ...prev, status: 'confirmed', txid } : prev);
-        } catch (updateErr) {
-          console.warn('update order failed (likely due to rules), continue with local status', updateErr);
-          setCurrentOrder(prev => prev && prev.id === currentOrder.id ? { ...prev, status: 'confirmed', txid } : prev);
-        }
-
-        try {
-          await pb.collection('license_keys').create({
-            code: genLicenseCode(),
-            user: currentOrder.user,
-            status: 'unused',
-            purchased_at: new Date().toISOString(),
-            note: `order:${currentOrder.id}`,
-          });
-        } catch (createKeyErr) {
-          console.warn('auto create license failed (likely due to rules), please handle server-side', createKeyErr);
-        }
-
-        pushToast('success', '检测到入账，已标记订单');
+      if (refreshed.status === 'confirmed' || refreshed.license_key) {
+        pushToast('success', '支付已确认，授权已发放');
         handlePayOpenChange(false);
         fetchLicenses();
       } else {
-        pushToast('warning', '暂未检测到最新入账，请稍后再试');
+        pushToast('warning', '未确认到账，请稍后再试');
       }
     } catch (error) {
       console.error('verify payment failed', error);
-      pushToast('error', '校验失败，请稍后重试或联系客服');
+      pushToast('error', error instanceof Error ? error.message : '校验失败，请稍后重试或联系客服');
     } finally {
       setVerifyingPay(false);
     }
