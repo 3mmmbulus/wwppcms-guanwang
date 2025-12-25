@@ -321,7 +321,7 @@ export function Orders() {
                   }
                   setVerifying(true);
                   try {
-                    await verifyOrderPayment(selected.id);
+                    const result = await verifyOrderPayment(selected);
 
                     const refreshed = await pb.collection('orders').getOne<Order>(selected.id, {
                       expand: 'license_key',
@@ -331,10 +331,10 @@ export function Orders() {
                     setItems(prev => prev.map(o => (o.id === selected.id ? normalized : o)));
                     setSelected(normalized);
 
-                    if (normalized.status === 'confirmed' || normalized.license_key) {
+                    if (result.confirmed && (normalized.status === 'confirmed' || normalized.license_key)) {
                       pushToast({ title: '支付已确认', description: '授权码已发放（如未展示请稍后刷新）。', variant: 'success' });
                     } else {
-                      pushToast({ title: '未确认到账', description: '请稍后再试，或确认金额/链是否正确。', variant: 'warning' });
+                      pushToast({ title: '未确认到账', description: result.message || '请稍后再试，或确认金额/链是否正确。', variant: 'warning' });
                     }
                   } catch (err) {
                     console.error('verify order failed', err);

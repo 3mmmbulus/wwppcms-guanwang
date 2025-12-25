@@ -386,7 +386,11 @@ export function Tasks() {
 
     setVerifyingPay(true);
     try {
-      await verifyOrderPayment(currentOrder.id);
+      const result = await verifyOrderPayment(currentOrder);
+      if (!result.confirmed) {
+        pushToast('warning', result.message || '未确认到账，请稍后再试');
+        return;
+      }
 
       const refreshed = await pb.collection('orders').getOne<Order>(currentOrder.id, { $autoCancel: false });
       setCurrentOrder(refreshed);
